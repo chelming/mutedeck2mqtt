@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
@@ -22,7 +25,7 @@ const (
 )
 
 const component = "sensor"
-const object_id = "mutedeck2mqtt_device_"
+const object_id = "mutedeck2mqtt_device"
 
 // Global variable to store the current log level
 var logLevel = INFO
@@ -59,25 +62,68 @@ func getClientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// Function to get the icon based on the key
-func getIcon(key string) string {
+// Function to get the icon and options based on the key
+func getIconAndOptions(key string) (string, []string) {
+	var icon string
+	var options []string
 	switch key {
 	case "call":
-		return "mdi:phone"
+		icon = "mdi:phone"
+		options = []string{"inactive", "active"}
 	case "control":
-		return "mdi:application-cog"
+		icon = "mdi:application-cog"
+		options = []string{"zoom", "teams", "google-meet", "system"}
 	case "mute":
-		return "mdi:microphone-off"
+		icon = "mdi:microphone-off"
+		options = []string{"active", "inactive", "disabled"}
 	case "record":
-		return "mdi:record-rec"
+		icon = "mdi:record-rec"
+		options = []string{"active", "inactive", "disabled"}
 	case "share":
-		return "mdi:monitor-share"
+		icon = "mdi:monitor-share"
+		options = []string{"active", "inactive", "disabled"}
 	case "video":
-		return "mdi:video"
+		icon = "mdi:video"
+		options = []string{"active", "inactive", "disabled"}
 	default:
-		return "mdi:information-outline"
+		icon = "mdi:information-outline"
+		options = []string{}
 	}
+	return icon, options
 }
+
+func toSentenceCase(s string) string {
+	s = strings.ReplaceAll(s, "_", " ")
+	caser := cases.Title(language.English)
+	return caser.String(s)
+}
+
+// DiscoveryPayload struct
+type DiscoveryPayload struct {
+	Device struct {
+		Identifiers  []string `json:"identifiers"`
+		Manufacturer string   `json:"manufacturer"`
+		Name         string   `json:"name"`
+		ViaDevice    string   `json:"via_device"`
+	} `json:"device"`
+	DeviceClass      string `json:"device_class"`
+	EnabledByDefault bool   `json:"enabled_by_default"`
+	EntityCategory   string `json:"entity_category"`
+	Icon             string `json:"icon"`
+	Name             string `json:"name"`
+	ObjectID         string `json:"object_id"`
+	Origin           struct {
+		Name string `json:"name"`
+		SW   string `json:"sw"`
+		URL  string `json:"url"`
+	} `json:"origin"`
+	StateTopic    string   `json:"state_topic"`
+	UniqueID      string   `json:"unique_id"`
+	ValueTemplate string   `json:"value_template"`
+	Options       []string `json:"options"`
+}
+
+var discoveryMessages = make(map[string]DiscoveryPayload)
 
 func main() {
 	// Set log level from environment variable
@@ -158,6 +204,14 @@ func main() {
 		log.Fatal(token.Error())
 	}
 
+	// Subscribe to homeassistant/status topic
+	client.Subscribe("homeassistant/status", 0, func(client mqtt.Client, msg mqtt.Message) {
+		if string(msg.Payload()) == "online" {
+			logMessage(INFO, "Home Assistant is online, resending discovery messages")
+			resendDiscoveryMessages(client)
+		}
+	})
+
 	// HTTP server handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Get the client's IP address
@@ -193,66 +247,66 @@ func main() {
 		}
 
 		// Publish the discovery message if not already sent
-		discoveryTopic := fmt.Sprintf("%s/%s%s/%s/config", discovery_prefix, component, object_id, topic)
-		mu.Lock()
-		if !discoveryTopics[discoveryTopic] {
-			discoveryPayload := map[string]interface{}{
-				"device": map[string]interface{}{
-					"identifiers":  []string{fmt.Sprintf("%s_%s", object_id, topic)},
-					"manufacturer": "MuteDeck",
-					"name":         topic,
-					"via_device":   fmt.Sprintf("%s_%s", object_id, topic),
-				},
-				"enabled_by_default": true,
-				"entity_category":    "diagnostic",
-				"icon":               "mdi:phone", // Default icon, will be updated per key
-				"object_id":          fmt.Sprintf("%s_%s", topic, "key"),
-				"origin": map[string]interface{}{
-					"name": "MuteDeck2MQTT",
-					"sw":   "2024.11.01",
-					"url":  "https://github.com/chelming/mutedeck2mqtt",
-				},
-				"state_topic":    fmt.Sprintf("%s/%s", prefix, topic),
-				"unique_id":      fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, "key"),
-				"value_template": "{{ value_json.key }}",
-			}
-
-			for key, _ := range data {
-				icon := getIcon(key)
-
-				discoveryPayload["icon"] = icon
-				discoveryPayload["object_id"] = fmt.Sprintf("%s_%s", topic, key)
-				discoveryPayload["unique_id"] = fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, key)
-				discoveryPayload["value_template"] = fmt.Sprintf("{{ value_json.%s }}", key)
-
-				jsonData, err := json.Marshal(discoveryPayload)
-				if err != nil {
-					logMessage(ERROR, fmt.Sprintf("Error marshaling discovery JSON data: %v", err))
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					mu.Unlock()
-					return
+		keysToSend := []string{"record", "share", "video", "call", "control", "mute"}
+		for _, key := range keysToSend {
+			if _, ok := data[key]; ok {
+				icon, options := getIconAndOptions(key)
+				discoveryPayload := DiscoveryPayload{
+					DeviceClass:      "enum",
+					EnabledByDefault: true,
+					EntityCategory:   "diagnostic",
+					Icon:             icon,
+					Name:             toSentenceCase(key),
+					ObjectID:         fmt.Sprintf("%s_%s", topic, key),
+					StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
+					UniqueID:         fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, key),
+					ValueTemplate:    fmt.Sprintf("{{ value_json.%s }}", key),
+					Options:          options,
 				}
+				discoveryPayload.Device.Identifiers = []string{fmt.Sprintf("%s_%s", object_id, topic)}
+				discoveryPayload.Device.Manufacturer = "MuteDeck"
+				discoveryPayload.Device.Name = toSentenceCase(topic)
+				discoveryPayload.Device.ViaDevice = fmt.Sprintf("%s_%s", object_id, topic)
+				discoveryPayload.Origin.Name = "MuteDeck2MQTT"
+				discoveryPayload.Origin.SW = "2024.11.01"
+				discoveryPayload.Origin.URL = "https://github.com/chelming/mutedeck2mqtt"
 
-				token := client.Publish(discoveryTopic, 0, true, jsonData) // Set retain flag to true for discovery
-				token.Wait()
-				if token.Error() != nil {
-					logMessage(ERROR, fmt.Sprintf("Error publishing discovery message to MQTT topic: %v", token.Error()))
-					http.Error(w, token.Error().Error(), http.StatusInternalServerError)
-					mu.Unlock()
-					return
+				discoveryTopic := fmt.Sprintf("%s/%s/%s_%s/%s/config", discovery_prefix, component, object_id, topic, key)
+
+				mu.Lock()
+				if !discoveryTopics[discoveryTopic] {
+					jsonData, err := json.Marshal(discoveryPayload)
+					if err != nil {
+						logMessage(ERROR, fmt.Sprintf("Error marshaling discovery JSON data: %v", err))
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						mu.Unlock()
+						return
+					}
+
+					token := client.Publish(discoveryTopic, 0, false, jsonData) // Set retain flag to true for discovery
+					token.Wait()
+					if token.Error() != nil {
+						logMessage(ERROR, fmt.Sprintf("Error publishing discovery message to MQTT topic: %v", token.Error()))
+						http.Error(w, token.Error().Error(), http.StatusInternalServerError)
+						mu.Unlock()
+						return
+					}
+					logMessage(INFO, fmt.Sprintf("Discovery message sent to topic: %s", discoveryTopic))
+					logMessage(DEBUG, fmt.Sprintf("Discovery message body: %s", jsonData))
+
+					discoveryTopics[discoveryTopic] = true
+					discoveryMessages[discoveryTopic] = discoveryPayload
 				}
-				discoveryTopics[discoveryTopic] = true
-				logMessage(INFO, fmt.Sprintf("Discovery message sent to topic: %s", discoveryTopic))
+				mu.Unlock()
 			}
 		}
-		mu.Unlock()
 
 		// Construct the full MQTT topic
 		fullTopic := ""
 		if prefix != "" {
 			fullTopic += prefix + "/"
 		}
-		fullTopic += topic + "/tele/SENSOR"
+		fullTopic += topic
 
 		// Publish the JSON data to the MQTT topic
 		jsonData, err := json.Marshal(data)
@@ -272,7 +326,7 @@ func main() {
 		}
 
 		// Log the published message
-		logMessage(INFO, fmt.Sprintf("MQT: %s = %s", topic+"/tele/SENSOR", string(jsonData)))
+		logMessage(INFO, fmt.Sprintf("MQT: %s = %s", fullTopic, string(jsonData)))
 
 		w.WriteHeader(http.StatusOK)
 	})
@@ -285,4 +339,25 @@ func main() {
 
 	// Start the HTTP server
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%s", port), nil))
+}
+
+func resendDiscoveryMessages(client mqtt.Client) {
+	mu.Lock()
+	defer mu.Unlock()
+	for topic, payload := range discoveryMessages {
+		jsonData, err := json.Marshal(payload)
+		if err != nil {
+			logMessage(ERROR, fmt.Sprintf("Error marshaling discovery JSON data: %v", err))
+			continue
+		}
+
+		token := client.Publish(topic, 0, false, jsonData)
+		token.Wait()
+		if token.Error() != nil {
+			logMessage(ERROR, fmt.Sprintf("Error publishing discovery message to MQTT topic: %v", token.Error()))
+			continue
+		}
+		logMessage(INFO, fmt.Sprintf("Resent discovery message to topic: %s", topic))
+		logMessage(DEBUG, fmt.Sprintf("Resent discovery message body: %s", jsonData))
+	}
 }
