@@ -65,49 +65,59 @@ func getClientIP(r *http.Request) string {
 }
 
 // Function to get the icon and options based on the key
-func getIconAndOptions(key string) (string, []string, string, string) {
+func getIconAndOptions(key string) (string, string, string, []string, string) {
+	var display_name string
+	var entity_type string
 	var icon string
 	var options []string
-	var entity_type string
 	var value_template string
 	switch key {
 	case "call":
+		display_name = "Call"
+		entity_type = "binary_sensor"
 		icon = "mdi:phone"
 		options = []string{}
-		entity_type = "binary_sensor"
 		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
 	case "control":
+		display_name = "Control"
+		entity_type = "select"
 		icon = "mdi:application-cog"
 		options = []string{"Zoom", "Teams", "Google Meet", "StreamYard", "Webex", "System"}
-		entity_type = "select"
 		value_template = fmt.Sprintf("{{ value_json.%s | replace('-', ' ') | title}}", key)
 	case "mute":
-		icon = "mdi:microphone-off"
-		options = []string{}
+		display_name = "Microphone"
 		entity_type = "binary_sensor"
-		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
+		icon = "mdi:microphone"
+		options = []string{}
+		value_template = fmt.Sprintf("{{ value_json.%s == 'active' and 'OFF' or 'ON' }}", key)
 	case "record":
+		display_name = "Recording"
+		entity_type = "binary_sensor"
 		icon = "mdi:record-rec"
 		options = []string{}
-		entity_type = "binary_sensor"
 		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
 	case "share":
+		display_name = "Screen sharing"
+		entity_type = "binary_sensor"
 		icon = "mdi:monitor-share"
 		options = []string{}
 		entity_type = "binary_sensor"
 		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
 	case "video":
+		display_name = "Video"
+		entity_type = "binary_sensor"
 		icon = "mdi:video"
 		options = []string{}
 		entity_type = "binary_sensor"
 		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
 	default:
+		display_name = key
+		entity_type = "sensor"
 		icon = "mdi:information-outline"
 		options = []string{}
-		entity_type = "sensor"
 		value_template = fmt.Sprintf("{{ value_json.%s }}", key)
 	}
-	return icon, options, entity_type, value_template
+	return display_name, entity_type, icon, options, value_template
 }
 
 func toSentenceCase(s string) string {
@@ -269,13 +279,13 @@ func main() {
 		keysToSend := []string{"record", "share", "video", "call", "control", "mute"}
 		for _, key := range keysToSend {
 			if _, ok := data[key]; ok {
-				icon, options, entity_type, value_template := getIconAndOptions(key)
+				display_name, entity_type, icon, options, value_template := getIconAndOptions(key)
 				discoveryPayload := DiscoveryPayload{
 					CommandTopic:     "mutedeck2mqtt/no-reply",
 					EnabledByDefault: true,
 					EntityCategory:   "diagnostic",
 					Icon:             icon,
-					Name:             toSentenceCase(key),
+					Name:             toSentenceCase(display_name),
 					ObjectID:         fmt.Sprintf("%s_%s", topic, key),
 					Optimistic:       false,
 					Options:          options,
