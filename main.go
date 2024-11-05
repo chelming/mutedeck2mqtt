@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -16,19 +17,20 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-// Custom log levels
+// Constants
 const (
+	object_id = "mutedeck2mqtt_device"
+
 	DEBUG = iota
 	INFO
 	WARN
 	ERROR
 )
 
-const component = "sensor"
-const object_id = "mutedeck2mqtt_device"
-
 // Global variable to store the current log level
 var logLevel = INFO
+
+var sentDiscoveryMessage = false
 
 // Map to store successfully sent discovery topics
 var discoveryTopics = make(map[string]bool)
@@ -63,33 +65,49 @@ func getClientIP(r *http.Request) string {
 }
 
 // Function to get the icon and options based on the key
-func getIconAndOptions(key string) (string, []string) {
+func getIconAndOptions(key string) (string, []string, string, string) {
 	var icon string
 	var options []string
+	var entity_type string
+	var value_template string
 	switch key {
 	case "call":
 		icon = "mdi:phone"
-		options = []string{"inactive", "active"}
+		options = []string{}
+		entity_type = "binary_sensor"
+		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
 	case "control":
 		icon = "mdi:application-cog"
-		options = []string{"zoom", "teams", "google-meet", "system"}
+		options = []string{"Zoom", "Teams", "Google Meet", "StreamYard", "Webex", "System"}
+		entity_type = "select"
+		value_template = fmt.Sprintf("{{ value_json.%s | replace('-', ' ') | title}}", key)
 	case "mute":
 		icon = "mdi:microphone-off"
-		options = []string{"active", "inactive", "disabled"}
+		options = []string{}
+		entity_type = "binary_sensor"
+		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
 	case "record":
 		icon = "mdi:record-rec"
-		options = []string{"active", "inactive", "disabled"}
+		options = []string{}
+		entity_type = "binary_sensor"
+		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
 	case "share":
 		icon = "mdi:monitor-share"
-		options = []string{"active", "inactive", "disabled"}
+		options = []string{}
+		entity_type = "binary_sensor"
+		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
 	case "video":
 		icon = "mdi:video"
-		options = []string{"active", "inactive", "disabled"}
+		options = []string{}
+		entity_type = "binary_sensor"
+		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
 	default:
 		icon = "mdi:information-outline"
 		options = []string{}
+		entity_type = "sensor"
+		value_template = fmt.Sprintf("{{ value_json.%s }}", key)
 	}
-	return icon, options
+	return icon, options, entity_type, value_template
 }
 
 func toSentenceCase(s string) string {
@@ -106,12 +124,13 @@ type DiscoveryPayload struct {
 		Name         string   `json:"name"`
 		ViaDevice    string   `json:"via_device"`
 	} `json:"device"`
-	DeviceClass      string `json:"device_class"`
+	CommandTopic     string `json:"command_topic"`
 	EnabledByDefault bool   `json:"enabled_by_default"`
 	EntityCategory   string `json:"entity_category"`
 	Icon             string `json:"icon"`
 	Name             string `json:"name"`
 	ObjectID         string `json:"object_id"`
+	Optimistic       bool   `json:"optimistic"`
 	Origin           struct {
 		Name string `json:"name"`
 		SW   string `json:"sw"`
@@ -250,18 +269,19 @@ func main() {
 		keysToSend := []string{"record", "share", "video", "call", "control", "mute"}
 		for _, key := range keysToSend {
 			if _, ok := data[key]; ok {
-				icon, options := getIconAndOptions(key)
+				icon, options, entity_type, value_template := getIconAndOptions(key)
 				discoveryPayload := DiscoveryPayload{
-					DeviceClass:      "enum",
+					CommandTopic:     "mutedeck2mqtt/no-reply",
 					EnabledByDefault: true,
 					EntityCategory:   "diagnostic",
 					Icon:             icon,
 					Name:             toSentenceCase(key),
 					ObjectID:         fmt.Sprintf("%s_%s", topic, key),
+					Optimistic:       false,
+					Options:          options,
 					StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
 					UniqueID:         fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, key),
-					ValueTemplate:    fmt.Sprintf("{{ value_json.%s }}", key),
-					Options:          options,
+					ValueTemplate:    value_template,
 				}
 				discoveryPayload.Device.Identifiers = []string{fmt.Sprintf("%s_%s", object_id, topic)}
 				discoveryPayload.Device.Manufacturer = "MuteDeck"
@@ -271,7 +291,7 @@ func main() {
 				discoveryPayload.Origin.SW = "2024.11.01"
 				discoveryPayload.Origin.URL = "https://github.com/chelming/mutedeck2mqtt"
 
-				discoveryTopic := fmt.Sprintf("%s/%s/%s_%s/%s/config", discovery_prefix, component, object_id, topic, key)
+				discoveryTopic := fmt.Sprintf("%s/%s/%s_%s/%s/config", discovery_prefix, entity_type, object_id, topic, key)
 
 				mu.Lock()
 				if !discoveryTopics[discoveryTopic] {
@@ -293,12 +313,17 @@ func main() {
 					}
 					logMessage(INFO, fmt.Sprintf("Discovery message sent to topic: %s", discoveryTopic))
 					logMessage(DEBUG, fmt.Sprintf("Discovery message body: %s", jsonData))
-
+					sentDiscoveryMessage = true
 					discoveryTopics[discoveryTopic] = true
 					discoveryMessages[discoveryTopic] = discoveryPayload
 				}
 				mu.Unlock()
 			}
+		}
+
+		// Pause to give HA time to create the sensors
+		if sentDiscoveryMessage {
+			time.Sleep(2 * time.Second)
 		}
 
 		// Construct the full MQTT topic
