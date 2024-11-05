@@ -5,13 +5,7 @@
 MuteDeck2MQTT is an application designed to work with [MuteDeck](https://mutedeck.com) to display call status in [Home Assistant](https://home-assistant.io). It leverages an MQTT server and MuteDeck's webhook functionality.
 
 ## Setup
-
-To set it up, go to MuteDeck's settings, enable the webhook, and enter the URL for where you're running MuteDeck2MQTT. The URL should be formatted similarly to `http://localhost:8080/?topic=${name to appear in Home Assistant}`. You can also add an optional `prefix` parameter, which defaults to `mutedeck2mqtt`.
-
-<img width="712" alt="image" src="https://github.com/user-attachments/assets/2ef2f598-1f3c-4e77-830a-979546eebb11">
-
-
-## Sample Docker Run Command
+### Sample Docker Run Command
 
 ```sh
 docker run -d \
@@ -28,7 +22,7 @@ docker run -d \
   ghcr.io/chelming/mutedeck2mqtt
 ```
 
-## Example Docker Compose YAML
+### Example Docker Compose YAML
 
 ```yaml
 services:
@@ -47,6 +41,14 @@ services:
     ports:
       - "8080:8080"
 ```
+
+### MuteDeck
+To set it up, go to MuteDeck's settings, enable the webhook, and enter the URL for where you're running MuteDeck2MQTT. The URL should be formatted similarly to `http://localhost:8080/?topic=${name to appear in Home Assistant}`. You can also add an optional `prefix` parameter, which defaults to `mutedeck2mqtt`.
+
+<img width="712" alt="image" src="https://github.com/user-attachments/assets/2ef2f598-1f3c-4e77-830a-979546eebb11">
+
+### Home Assistant
+As long as MQTT is set up in Home Assistant, the device should automatically appear after it checks in for the first time using MQTT discovery. The MQTT message is not currently set to `retain` since there's no current way to delete a device from this app. When Home Assistant restarts and broadcasts a Birth Message, mutedeck2mqtt will automatically rebroadcast the discovery messages.
 
 ## Environment Variables
 
