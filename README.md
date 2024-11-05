@@ -45,7 +45,8 @@ services:
 ### MuteDeck
 To set it up, go to MuteDeck's settings, enable the webhook, and enter the URL for where you're running MuteDeck2MQTT. The URL should be formatted similarly to `http://localhost:8080/?topic=${name to appear in Home Assistant}`. You can also add an optional `prefix` parameter, which defaults to `mutedeck2mqtt`.
 
-<img width="712" alt="image" src="https://github.com/user-attachments/assets/2ef2f598-1f3c-4e77-830a-979546eebb11">
+<img width="668" alt="Image showing the MuteDeck setting window with the Notifications tab selected. The Enable Webhook button is turned on and in the text box below http://mutedeck2mqtt.local:8080/?topic=MyComp is entered." src="https://github.com/user-attachments/assets/2bdd7434-fd81-4e16-b552-9a261d8ed729">
+
 
 ### Home Assistant
 As long as MQTT is set up in Home Assistant, the device should automatically appear after it checks in for the first time using MQTT discovery. The MQTT message is not currently set to `retain` since there's no current way to delete a device from this app. When Home Assistant restarts and broadcasts a Birth Message, mutedeck2mqtt will automatically rebroadcast the discovery messages.
