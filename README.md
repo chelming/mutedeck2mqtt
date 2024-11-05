@@ -4,7 +4,12 @@
 
 MuteDeck2MQTT is an application designed to work with [MuteDeck](https://mutedeck.com) to display call status in [Home Assistant](https://home-assistant.io). It leverages an MQTT server and MuteDeck's webhook functionality.
 
-To set it up, go to MuteDeck's settings, enable the webhook, and enter the URL for the MuteDeck2MQTT app. The URL should be `http://localhost:8080/?topic=${name to appear in Home Assistant}`. Note that the URL may change if you're using a reverse proxy. You can also add an optional `prefix` parameter, which defaults to `mutedeck2mqtt`.
+## Setup
+
+To set it up, go to MuteDeck's settings, enable the webhook, and enter the URL for where you're running MuteDeck2MQTT. The URL should be formatted similarly to `http://localhost:8080/?topic=${name to appear in Home Assistant}`. You can also add an optional `prefix` parameter, which defaults to `mutedeck2mqtt`.
+
+<img width="712" alt="image" src="https://github.com/user-attachments/assets/2ef2f598-1f3c-4e77-830a-979546eebb11">
+
 
 ## Sample Docker Run Command
 
@@ -26,8 +31,6 @@ docker run -d \
 ## Example Docker Compose YAML
 
 ```yaml
-version: '3.8'
-
 services:
   mutedeck2mqtt:
     image: ghcr.io/chelming/mutedeck2mqtt
