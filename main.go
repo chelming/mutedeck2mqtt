@@ -279,7 +279,7 @@ func main() {
 				},
 				Origin: Origin{
 					Name:            "MuteDeck2MQTT",
-					SoftwareVersion: "2024.12.2",
+					SoftwareVersion: "2024.12.16",
 					URL:             "https://github.com/chelming/mutedeck2mqtt/",
 				},
 				Components: map[string]Component{
