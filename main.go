@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -29,8 +30,6 @@ const (
 
 // Global variable to store the current log level
 var logLevel = INFO
-
-var sentDiscoveryMessage = false
 
 // Map to store successfully sent discovery topics
 var discoveryTopics = make(map[string]bool)
@@ -64,95 +63,70 @@ func getClientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// Function to get the icon and options based on the key
-func getIconAndOptions(key string) (string, string, string, []string, string) {
-	var display_name string
-	var entity_type string
-	var icon string
-	var options []string
-	var value_template string
-	switch key {
-	case "call":
-		display_name = "Call"
-		entity_type = "binary_sensor"
-		icon = "mdi:phone"
-		options = []string{}
-		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
-	case "control":
-		display_name = "Control"
-		entity_type = "select"
-		icon = "mdi:application-cog"
-		options = []string{"Zoom", "Teams", "Google Meet", "StreamYard", "Webex", "System"}
-		value_template = fmt.Sprintf("{{ value_json.%s | replace('-', ' ') | title}}", key)
-	case "mute":
-		display_name = "Microphone"
-		entity_type = "binary_sensor"
-		icon = "mdi:microphone"
-		options = []string{}
-		value_template = fmt.Sprintf("{{ value_json.%s == 'active' and 'OFF' or 'ON' }}", key)
-	case "record":
-		display_name = "Recording"
-		entity_type = "binary_sensor"
-		icon = "mdi:record-rec"
-		options = []string{}
-		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
-	case "share":
-		display_name = "Screen sharing"
-		entity_type = "binary_sensor"
-		icon = "mdi:monitor-share"
-		options = []string{}
-		entity_type = "binary_sensor"
-		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
-	case "video":
-		display_name = "Video"
-		entity_type = "binary_sensor"
-		icon = "mdi:video"
-		options = []string{}
-		entity_type = "binary_sensor"
-		value_template = fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", key)
+func getPlatformName(input string) string {
+	switch {
+	case strings.HasPrefix(input, "zoom"):
+		return "Zoom"
+	case strings.HasPrefix(input, "teams"):
+		return "Teams"
+	case input == "webex":
+		return "Webex"
+	case input == "streamyard":
+		return "StreamYard"
+	case input == "google-meet":
+		return "Google Meet"
 	default:
-		display_name = key
-		entity_type = "sensor"
-		icon = "mdi:information-outline"
-		options = []string{}
-		value_template = fmt.Sprintf("{{ value_json.%s }}", key)
+		return toTitleCase(input)
 	}
-	return display_name, entity_type, icon, options, value_template
 }
 
-func toSentenceCase(s string) string {
+func toTitleCase(s string) string {
 	s = strings.ReplaceAll(s, "_", " ")
 	caser := cases.Title(language.English)
 	return caser.String(s)
 }
 
-// DiscoveryPayload struct
-type DiscoveryPayload struct {
-	Device struct {
-		Identifiers  []string `json:"identifiers"`
-		Manufacturer string   `json:"manufacturer"`
-		Name         string   `json:"name"`
-		ViaDevice    string   `json:"via_device"`
-	} `json:"device"`
-	CommandTopic     string `json:"command_topic"`
-	EnabledByDefault bool   `json:"enabled_by_default"`
-	EntityCategory   string `json:"entity_category"`
-	Icon             string `json:"icon"`
-	Name             string `json:"name"`
-	ObjectID         string `json:"object_id"`
-	Optimistic       bool   `json:"optimistic"`
-	Origin           struct {
-		Name string `json:"name"`
-		SW   string `json:"sw"`
-		URL  string `json:"url"`
-	} `json:"origin"`
-	StateTopic    string   `json:"state_topic"`
-	UniqueID      string   `json:"unique_id"`
-	ValueTemplate string   `json:"value_template"`
-	Options       []string `json:"options"`
+// Single discovery payload
+type Device struct {
+	IDs             []string `json:"ids"`
+	Name            string   `json:"name"`
+	Manufacturer    string   `json:"mf"`
+	Model           string   `json:"mdl"`
+	SoftwareVersion string   `json:"sw"`
+	SerialNumber    string   `json:"sn"`
+	HardwareVersion string   `json:"hw"`
 }
 
-var discoveryMessages = make(map[string]DiscoveryPayload)
+type Origin struct {
+	Name            string `json:"name"`
+	SoftwareVersion string `json:"sw"`
+	URL             string `json:"url"`
+}
+
+type Component struct {
+	CommandTopic     string   `json:"cmd_t"`
+	EnabledByDefault bool     `json:"en"`
+	EntityCategory   string   `json:"ent_cat"`
+	Icon             string   `json:"icon"`
+	Name             string   `json:"name"`
+	ObjectID         string   `json:"obj_id"`
+	Optimistic       bool     `json:"opt"`
+	Options          []string `json:"options"`
+	Platform         string   `json:"p"`
+	StateTopic       string   `json:"stat_t"`
+	UniqueID         string   `json:"uniq_id"`
+	ValueTemplate    string   `json:"val_tpl"`
+}
+
+type DiscoveryPayloadStruct struct {
+	Device           Device               `json:"dev"`
+	Origin           Origin               `json:"o"`
+	Components       map[string]Component `json:"cmps"`
+	StateTopic       string               `json:"stat_t"`
+	QualityOfService int                  `json:"qos"`
+}
+
+var discoveryMessages = make(map[string]DiscoveryPayloadStruct)
 
 func main() {
 	// Set log level from environment variable
@@ -236,7 +210,7 @@ func main() {
 	// Subscribe to homeassistant/status topic
 	client.Subscribe("homeassistant/status", 0, func(client mqtt.Client, msg mqtt.Message) {
 		if string(msg.Payload()) == "online" {
-			logMessage(INFO, "Home Assistant is online, resending discovery messages")
+			logMessage(INFO, "Home Assistant is online, resending discovery message")
 			resendDiscoveryMessages(client)
 		}
 	})
@@ -247,9 +221,19 @@ func main() {
 		clientIP := getClientIP(r)
 		logMessage(DEBUG, fmt.Sprintf("Request received from IP: %s", clientIP))
 
+		// Read the body
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Print the incoming body
+		logMessage(DEBUG, fmt.Sprintf("Incoming body: %s", string(body)))
+
 		// Parse JSON body
 		var data map[string]interface{}
-		err := json.NewDecoder(r.Body).Decode(&data)
+		err = json.Unmarshal(body, &data)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -265,6 +249,11 @@ func main() {
 			}
 		}
 
+		// Process the control field through getPlatformName
+		if control, ok := data["control"].(string); ok {
+			data["control"] = getPlatformName(control)
+		}
+
 		// Get MQTT topic and prefix from URL parameters
 		topic := r.URL.Query().Get("topic")
 		if topic == "" {
@@ -275,73 +264,142 @@ func main() {
 			prefix = "mutedeck2mqtt"
 		}
 
-		// Publish the discovery message if not already sent
-		keysToSend := []string{"record", "share", "video", "call", "control", "mute"}
-		for _, key := range keysToSend {
-			if _, ok := data[key]; ok {
-				display_name, entity_type, icon, options, value_template := getIconAndOptions(key)
-				discoveryPayload := DiscoveryPayload{
-					CommandTopic:     "mutedeck2mqtt/no-reply",
-					EnabledByDefault: true,
-					EntityCategory:   "diagnostic",
-					Icon:             icon,
-					Name:             toSentenceCase(display_name),
-					ObjectID:         fmt.Sprintf("%s_%s", topic, key),
-					Optimistic:       false,
-					Options:          options,
-					StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
-					UniqueID:         fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, key),
-					ValueTemplate:    value_template,
-				}
-				discoveryPayload.Device.Identifiers = []string{fmt.Sprintf("%s_%s", object_id, topic)}
-				discoveryPayload.Device.Manufacturer = "MuteDeck"
-				discoveryPayload.Device.Name = toSentenceCase(topic)
-				discoveryPayload.Device.ViaDevice = fmt.Sprintf("%s_%s", object_id, topic)
-				discoveryPayload.Origin.Name = "MuteDeck2MQTT"
-				discoveryPayload.Origin.SW = "2024.11.01"
-				discoveryPayload.Origin.URL = "https://github.com/chelming/mutedeck2mqtt"
+		logMessage(DEBUG, "Checking discovery topic")
 
-				discoveryTopic := fmt.Sprintf("%s/%s/%s_%s/%s/config", discovery_prefix, entity_type, object_id, topic, key)
-
-				mu.Lock()
-				if !discoveryTopics[discoveryTopic] {
-					jsonData, err := json.Marshal(discoveryPayload)
-					if err != nil {
-						logMessage(ERROR, fmt.Sprintf("Error marshaling discovery JSON data: %v", err))
-						http.Error(w, err.Error(), http.StatusInternalServerError)
-						mu.Unlock()
-						return
-					}
-
-					token := client.Publish(discoveryTopic, 0, false, jsonData) // Set retain flag to true for discovery
-					token.Wait()
-					if token.Error() != nil {
-						logMessage(ERROR, fmt.Sprintf("Error publishing discovery message to MQTT topic: %v", token.Error()))
-						http.Error(w, token.Error().Error(), http.StatusInternalServerError)
-						mu.Unlock()
-						return
-					}
-					logMessage(INFO, fmt.Sprintf("Discovery message sent to topic: %s", discoveryTopic))
-					logMessage(DEBUG, fmt.Sprintf("Discovery message body: %s", jsonData))
-					sentDiscoveryMessage = true
-					discoveryTopics[discoveryTopic] = true
-					discoveryMessages[discoveryTopic] = discoveryPayload
-				}
-				mu.Unlock()
+		discoveryTopic := fmt.Sprintf("%s/%s/%s_%s/config", discovery_prefix, "device", object_id, topic)
+		mu.Lock()
+		if !discoveryTopics[discoveryTopic] {
+			logMessage(DEBUG, "Preparing discovery topic")
+			// Create the discovery message
+			discoveryPayload := DiscoveryPayloadStruct{
+				Device: Device{
+					IDs:          []string{fmt.Sprintf("%s_%s", object_id, topic)},
+					Name:         toTitleCase(topic),
+					Manufacturer: "MuteDeck",
+				},
+				Origin: Origin{
+					Name:            "MuteDeck2MQTT",
+					SoftwareVersion: "2024.12.16",
+					URL:             "https://github.com/chelming/mutedeck2mqtt/",
+				},
+				Components: map[string]Component{
+					fmt.Sprintf("%s_%s", topic, "call"): {
+						CommandTopic:     "mutedeck2mqtt/no-reply",
+						EnabledByDefault: true,
+						EntityCategory:   "diagnostic",
+						Icon:             "mdi:phone",
+						Name:             "Call",
+						ObjectID:         fmt.Sprintf("%s_%s", topic, "call"),
+						Optimistic:       false,
+						Options:          []string{},
+						Platform:         "binary_sensor",
+						StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
+						UniqueID:         fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, "call"),
+						ValueTemplate:    fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", "call"),
+					},
+					fmt.Sprintf("%s_%s", topic, "control"): {
+						CommandTopic:     "mutedeck2mqtt/no-reply",
+						EnabledByDefault: true,
+						EntityCategory:   "diagnostic",
+						Icon:             "mdi:application-cog",
+						Name:             "Control",
+						ObjectID:         fmt.Sprintf("%s_%s", topic, "control"),
+						Optimistic:       false,
+						Options:          []string{"Zoom", "Teams", "Google Meet", "StreamYard", "Webex", "System"},
+						Platform:         "select",
+						StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
+						UniqueID:         fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, "control"),
+						ValueTemplate:    fmt.Sprintf("{{ value_json.%s }}", "control"),
+					},
+					fmt.Sprintf("%s_%s", topic, "mute"): {
+						CommandTopic:     "mutedeck2mqtt/no-reply",
+						EnabledByDefault: true,
+						EntityCategory:   "diagnostic",
+						Icon:             "mdi:microphone",
+						Name:             "Microphone",
+						ObjectID:         fmt.Sprintf("%s_%s", topic, "mute"),
+						Optimistic:       false,
+						Options:          []string{},
+						Platform:         "binary_sensor",
+						StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
+						UniqueID:         fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, "mute"),
+						ValueTemplate:    fmt.Sprintf("{{ value_json.%s == 'active' and 'OFF' or 'ON' }}", "mute"),
+					},
+					fmt.Sprintf("%s_%s", topic, "record"): {
+						CommandTopic:     "mutedeck2mqtt/no-reply",
+						EnabledByDefault: true,
+						EntityCategory:   "diagnostic",
+						Icon:             "mdi:record-rec",
+						Name:             "Recording",
+						ObjectID:         fmt.Sprintf("%s_%s", topic, "record"),
+						Optimistic:       false,
+						Options:          []string{},
+						Platform:         "binary_sensor",
+						StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
+						UniqueID:         fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, "record"),
+						ValueTemplate:    fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", "record"),
+					},
+					fmt.Sprintf("%s_%s", topic, "share"): {
+						CommandTopic:     "mutedeck2mqtt/no-reply",
+						EnabledByDefault: true,
+						EntityCategory:   "diagnostic",
+						Icon:             "mdi:monitor-share",
+						Name:             "Screen sharing",
+						ObjectID:         fmt.Sprintf("%s_%s", topic, "share"),
+						Optimistic:       false,
+						Options:          []string{},
+						Platform:         "binary_sensor",
+						StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
+						UniqueID:         fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, "share"),
+						ValueTemplate:    fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", "share"),
+					},
+					fmt.Sprintf("%s_%s", topic, "video"): {
+						CommandTopic:     "mutedeck2mqtt/no-reply",
+						EnabledByDefault: true,
+						EntityCategory:   "diagnostic",
+						Icon:             "mdi:video",
+						Name:             "Video",
+						ObjectID:         fmt.Sprintf("%s_%s", topic, "video"),
+						Optimistic:       false,
+						Options:          []string{},
+						Platform:         "binary_sensor",
+						StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
+						UniqueID:         fmt.Sprintf("%s_%s_mutedeck2mqtt", topic, "video"),
+						ValueTemplate:    fmt.Sprintf("{{ value_json.%s != 'active' and 'OFF' or 'ON' }}", "video"),
+					},
+				},
+				StateTopic:       fmt.Sprintf("%s/%s", prefix, topic),
+				QualityOfService: 0,
 			}
-		}
+			jsonData, err := json.Marshal(discoveryPayload)
+			if err != nil {
+				logMessage(ERROR, fmt.Sprintf("Error marshaling discovery JSON data: %v", err))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				mu.Unlock()
+				return
+			}
 
-		// Pause to give HA time to create the sensors
-		if sentDiscoveryMessage {
+			token := client.Publish(discoveryTopic, 0, false, jsonData) // Set retain flag to true for discovery
+			token.Wait()
+			if token.Error() != nil {
+				logMessage(ERROR, fmt.Sprintf("Error publishing discovery message to MQTT topic: %v", token.Error()))
+				http.Error(w, token.Error().Error(), http.StatusInternalServerError)
+				mu.Unlock()
+				return
+			}
+			logMessage(INFO, fmt.Sprintf("Discovery message sent to topic: %s", discoveryTopic))
+			logMessage(DEBUG, fmt.Sprintf("Discovery message body: %s", jsonData))
+
+			discoveryTopics[discoveryTopic] = true
+			discoveryMessages[discoveryTopic] = discoveryPayload
+
+			// Pause to give HA time to create the sensors
 			time.Sleep(2 * time.Second)
 		}
+		mu.Unlock()
 
 		// Construct the full MQTT topic
-		fullTopic := ""
-		if prefix != "" {
-			fullTopic += prefix + "/"
-		}
-		fullTopic += topic
+		fullTopic := fmt.Sprintf("%s/%s", prefix, topic)
 
 		// Publish the JSON data to the MQTT topic
 		jsonData, err := json.Marshal(data)
@@ -350,8 +408,8 @@ func main() {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		logMessage(DEBUG, fmt.Sprintf("Received body from %s: %s", clientIP, jsonData))
 
+		logMessage(DEBUG, fmt.Sprintf("Sending body: %s", jsonData))
 		token := client.Publish(fullTopic, 0, false, jsonData)
 		token.Wait()
 		if token.Error() != nil {
