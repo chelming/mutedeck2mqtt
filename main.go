@@ -379,7 +379,7 @@ func main() {
 				return
 			}
 
-			token := client.Publish(discoveryTopic, 0, false, jsonData) // Set retain flag to true for discovery
+			token := client.Publish(discoveryTopic, 0, true, jsonData) // Retain so HA receives discovery on reconnect
 			token.Wait()
 			if token.Error() != nil {
 				logMessage(ERROR, fmt.Sprintf("Error publishing discovery message to MQTT topic: %v", token.Error()))
@@ -444,7 +444,7 @@ func resendDiscoveryMessages(client mqtt.Client) {
 			continue
 		}
 
-		token := client.Publish(topic, 0, false, jsonData)
+		token := client.Publish(topic, 0, true, jsonData)
 		token.Wait()
 		if token.Error() != nil {
 			logMessage(ERROR, fmt.Sprintf("Error publishing discovery message to MQTT topic: %v", token.Error()))
