@@ -49,7 +49,7 @@ To set it up, go to MuteDeck's settings, enable the webhook, and enter the URL f
 
 
 ### Home Assistant
-As long as MQTT is set up in Home Assistant, the device should automatically appear after it checks in for the first time using MQTT discovery. Discovery and state messages are retained, so Home Assistant has the last state after a restart. When Home Assistant restarts and broadcasts a Birth Message, mutedeck2mqtt will automatically rebroadcast the discovery messages.
+As long as MQTT is set up in Home Assistant, the device should automatically appear after it checks in for the first time using MQTT discovery. Discovery and state messages are retained, so Home Assistant has the last state after a restart. The bridge never clears that retained state, so a webhook-only device keeps showing its last state after the bridge or MuteDeck goes away, until the next webhook arrives. To clear it from the broker, publish an empty retained message to `<prefix>/<topic>`. When Home Assistant restarts and broadcasts a Birth Message, mutedeck2mqtt will automatically rebroadcast the discovery messages.
 
 ### Controlling MuteDeck (optional)
 
@@ -67,13 +67,18 @@ running it). For that device:
 How it stays responsive: after a command the bridge publishes the expected state at once.
 MuteDeck's `/v1/status` lags a change by up to about 1.5 s, so the bridge then checks it
 every 0.5 s for up to 3 s and publishes once MuteDeck agrees, or publishes whatever MuteDeck
-reports when the window runs out. Polls pause during that window. It also
+reports when the window runs out. A toggle or Leave meeting has no expected state, so the
+bridge reads `/v1/status` before acting and waits for the field to change instead. Polls
+pause while any command is being confirmed, and confirming one command keeps the expected
+state of any other still in flight (for example mute and then video in quick succession). It also
 polls `/v1/status` every `MUTEDECK_POLL_INTERVAL` seconds, so the state stays right even
 when a webhook is missed, and only publishes when something changed. The webhook still
 works and merges into the same device when it uses the same `topic` and `prefix`.
 
 Availability: the device is available only while both the bridge (MQTT last will on
 `<prefix>/status`) and MuteDeck (`<prefix>/<topic>/availability`, set by the poll) are up.
+Both are retained. They are only published when `MUTEDECK_API_URL` is set; webhook-only
+devices have no availability.
 
 Authentication: MuteDeck accepts calls without a token only from its own computer by
 default. When the bridge runs elsewhere, create a token in MuteDeck under Settings >

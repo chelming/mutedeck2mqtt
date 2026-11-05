@@ -143,3 +143,31 @@ func TestBuildDiscovery(t *testing.T) {
 		t.Errorf("state topics: leave %q, mute %q", d.Components["work_leave"].StateTopic, d.Components["work_mute"].StateTopic)
 	}
 }
+
+func TestConcurrentConfirmations(t *testing.T) {
+	// Mute then video within the confirm window: finishing the first must neither
+	// resume polls nor drop the second command's prediction
+	mute := startConfirm(map[string]interface{}{"mute": "active"})
+	video := startConfirm(map[string]interface{}{"video": "active"})
+	toggle := startConfirm(nil)
+
+	others := finishConfirm(mute)
+	if !confirming() {
+		t.Errorf("polls resumed while video and toggle are still confirming")
+	}
+	if others["video"] != "active" || others["mute"] != nil {
+		t.Errorf("after mute: others = %v, want only video=active", others)
+	}
+	finishConfirm(mute) // harmless repeat, as from the deferred call
+	finishConfirm(video)
+	if !confirming() {
+		t.Errorf("polls resumed while the toggle is still confirming")
+	}
+	if others := finishConfirm(toggle); len(others) != 0 || confirming() {
+		t.Errorf("after all: others = %v, confirming = %v", others, confirming())
+	}
+
+	if watchedField("leave") != "call" || watchedField("mute") != "mute" {
+		t.Errorf("watchedField: leave=%q mute=%q", watchedField("leave"), watchedField("mute"))
+	}
+}

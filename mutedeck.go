@@ -167,6 +167,16 @@ func handleCommand(client mqtt.Client, discoveryPrefix, field, payload string) {
 		logMessage(WARN, fmt.Sprintf("Ignoring command: %v", err))
 		return
 	}
+
+	// A toggle or leave has no predicted state, so it is confirmed by watching a field
+	// change. Read the baseline now, before acting: lastState may be empty or stale.
+	var before map[string]interface{}
+	if predicted == nil {
+		if before, err = api.status(); err != nil {
+			logMessage(WARN, fmt.Sprintf("Could not read MuteDeck status before %s: %v", field, err))
+		}
+	}
+
 	logMessage(INFO, fmt.Sprintf("Command %s=%s -> /v1/%s state=%q", field, payload, endpoint, state))
 	if err := api.action(endpoint, state); err != nil {
 		logMessage(ERROR, fmt.Sprintf("Command %s=%s failed: %v", field, payload, err))
@@ -175,44 +185,74 @@ func handleCommand(client mqtt.Client, discoveryPrefix, field, payload string) {
 		return
 	}
 
+	if predicted == nil && before == nil {
+		// Without a baseline any status would look settled, so just publish the current one
+		refreshStatus(client, discoveryPrefix, false)
+		return
+	}
+
 	// Show the expected state at once instead of waiting for the webhook or the next
 	// poll. MuteDeck's /v1/status lags the change by up to ~1.5 s, so publishing it
 	// straight away would flip the switch back for a moment. Instead, wait until
 	// MuteDeck agrees (or the window runs out) and then publish what it reports.
+	id := startConfirm(predicted)
+	defer finishConfirm(id)
 	if predicted != nil {
 		if err := publishState(client, discoveryPrefix, apiPrefix, apiTopic, predicted, false); err != nil {
 			logMessage(ERROR, fmt.Sprintf("Error publishing predicted state: %v", err))
 		}
 	}
-	confirmCommand(client, discoveryPrefix, field, predicted)
+	confirmCommand(client, discoveryPrefix, id, watchedField(field), predicted, before)
 }
 
-// Polls skip publishing while a command is being confirmed, so a stale status
-// cannot overwrite the predicted state.
-var confirmUntil time.Time
+// watchedField is the status field a command without a prediction is expected to change
+func watchedField(field string) string {
+	if field == "leave" {
+		return "call"
+	}
+	return field
+}
+
+// Commands being confirmed, by id, with their predicted state (nil for a toggle).
+// Polls skip publishing while any is in flight, so a stale status cannot overwrite
+// a predicted state. A confirmed status keeps the predictions of the other commands
+// still in flight, so confirming one command cannot undo another.
+var pending = map[int]map[string]interface{}{}
+var pendingSeq int
 var confirmMu sync.Mutex
 
 func confirming() bool {
 	confirmMu.Lock()
 	defer confirmMu.Unlock()
-	return time.Now().Before(confirmUntil)
+	return len(pending) > 0
 }
 
-func confirmCommand(client mqtt.Client, discoveryPrefix, field string, predicted map[string]interface{}) {
+func startConfirm(predicted map[string]interface{}) int {
+	confirmMu.Lock()
+	defer confirmMu.Unlock()
+	pendingSeq++
+	pending[pendingSeq] = predicted
+	return pendingSeq
+}
+
+// finishConfirm removes the command and returns the predictions of those still in
+// flight. Calling it again for the same id is harmless.
+func finishConfirm(id int) map[string]interface{} {
+	confirmMu.Lock()
+	defer confirmMu.Unlock()
+	delete(pending, id)
+	others := map[string]interface{}{}
+	for _, predicted := range pending {
+		for k, v := range predicted {
+			others[k] = v
+		}
+	}
+	return others
+}
+
+func confirmCommand(client mqtt.Client, discoveryPrefix string, id int, field string, predicted, before map[string]interface{}) {
 	const attempts = 6
 	const interval = 500 * time.Millisecond
-	confirmMu.Lock()
-	confirmUntil = time.Now().Add(attempts*interval + time.Second)
-	confirmMu.Unlock()
-	defer func() {
-		confirmMu.Lock()
-		confirmUntil = time.Time{}
-		confirmMu.Unlock()
-	}()
-
-	stateMu.Lock()
-	before := lastState[apiStateTopic()][field]
-	stateMu.Unlock()
 
 	for i := 1; i <= attempts; i++ {
 		time.Sleep(interval)
@@ -228,12 +268,14 @@ func confirmCommand(client mqtt.Client, discoveryPrefix, field string, predicted
 				}
 			}
 		} else {
-			// A toggle has no prediction: settled once the field changes
-			settled = data[field] != before
+			settled = data[field] != before[field]
 		}
 		if settled || i == attempts {
 			if !settled {
 				logMessage(WARN, fmt.Sprintf("MuteDeck did not confirm %s within %s, publishing what it reports", field, attempts*interval))
+			}
+			for k, v := range finishConfirm(id) {
+				data[k] = v
 			}
 			if err := publishState(client, discoveryPrefix, apiPrefix, apiTopic, data, true); err != nil {
 				logMessage(ERROR, fmt.Sprintf("Error publishing confirmed state: %v", err))

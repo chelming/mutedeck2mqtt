@@ -238,13 +238,18 @@ func main() {
 	opts.SetUsername(MQTT_USER)
 	opts.SetPassword(MQTT_PASS)
 	opts.SetAutoReconnect(true)
-	// Marks every entity of the API device unavailable when the bridge goes away
-	opts.SetWill(bridgeStatusTopic(), "offline", 1, true)
+	// Marks every entity of the API device unavailable when the bridge goes away.
+	// Webhook-only devices have no availability, so they get no status topic.
+	if api != nil {
+		opts.SetWill(bridgeStatusTopic(), "offline", 1, true)
+	}
 
 	// Subscriptions are made here so they are restored after a reconnect
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		logMessage(INFO, "Connected to MQTT")
-		client.Publish(bridgeStatusTopic(), 1, true, "online")
+		if api != nil {
+			client.Publish(bridgeStatusTopic(), 1, true, "online")
+		}
 
 		// Subscribe to homeassistant/status topic
 		client.Subscribe("homeassistant/status", 0, func(client mqtt.Client, msg mqtt.Message) {
@@ -437,34 +442,44 @@ func buildDiscovery(prefix, topic string) DiscoveryPayloadStruct {
 
 // ensureDiscovery publishes the device's discovery message the first time it is seen
 func ensureDiscovery(client mqtt.Client, discoveryPrefix, prefix, topic string) error {
+	sent, err := sendDiscovery(client, discoveryPrefix, prefix, topic)
+	if sent {
+		// Pause to give HA time to create the sensors. This runs after mu is released so
+		// the poller, commands, webhooks and discovery resends are not held up meanwhile;
+		// any state they publish is retained, so HA still picks it up.
+		time.Sleep(2 * time.Second)
+	}
+	return err
+}
+
+// sendDiscovery publishes the discovery message unless it was already sent, and reports
+// whether it sent one now
+func sendDiscovery(client mqtt.Client, discoveryPrefix, prefix, topic string) (bool, error) {
 	discoveryTopic := fmt.Sprintf("%s/%s/%s_%s/config", discoveryPrefix, "device", object_id, topic)
 	mu.Lock()
 	defer mu.Unlock()
 	if discoveryTopics[discoveryTopic] {
-		return nil
+		return false, nil
 	}
 
 	logMessage(DEBUG, "Preparing discovery topic")
 	discoveryPayload := buildDiscovery(prefix, topic)
 	jsonData, err := json.Marshal(discoveryPayload)
 	if err != nil {
-		return fmt.Errorf("marshaling discovery JSON data: %w", err)
+		return false, fmt.Errorf("marshaling discovery JSON data: %w", err)
 	}
 
 	token := client.Publish(discoveryTopic, 0, true, jsonData) // Retain so HA receives discovery on reconnect
 	token.Wait()
 	if token.Error() != nil {
-		return fmt.Errorf("publishing discovery message: %w", token.Error())
+		return false, fmt.Errorf("publishing discovery message: %w", token.Error())
 	}
 	logMessage(INFO, fmt.Sprintf("Discovery message sent to topic: %s", discoveryTopic))
 	logMessage(DEBUG, fmt.Sprintf("Discovery message body: %s", jsonData))
 
 	discoveryTopics[discoveryTopic] = true
 	discoveryMessages[discoveryTopic] = discoveryPayload
-
-	// Pause to give HA time to create the sensors
-	time.Sleep(2 * time.Second)
-	return nil
+	return true, nil
 }
 
 // publishState merges data into the device's last known state and publishes it, retained.
