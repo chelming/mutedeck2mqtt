@@ -49,7 +49,48 @@ To set it up, go to MuteDeck's settings, enable the webhook, and enter the URL f
 
 
 ### Home Assistant
-As long as MQTT is set up in Home Assistant, the device should automatically appear after it checks in for the first time using MQTT discovery. The MQTT message is not currently set to `retain` since there's no current way to delete a device from this app. When Home Assistant restarts and broadcasts a Birth Message, mutedeck2mqtt will automatically rebroadcast the discovery messages.
+As long as MQTT is set up in Home Assistant, the device should automatically appear after it checks in for the first time using MQTT discovery. Discovery and state messages are retained, so Home Assistant has the last state after a restart. The bridge never clears that retained state, so a webhook-only device keeps showing its last state after the bridge or MuteDeck goes away, until the next webhook arrives. To clear it from the broker, publish an empty retained message to `<prefix>/<topic>`. When Home Assistant restarts and broadcasts a Birth Message, mutedeck2mqtt will automatically rebroadcast the discovery messages.
+
+### Controlling MuteDeck (optional)
+
+Set `MUTEDECK_API_URL` to make one device controllable through MuteDeck's local API (the
+API is documented by MuteDeck itself at `http://localhost:3491/swagger-ui` on the computer
+running it). For that device:
+
+| Entity | Type | Behavior |
+|---|---|---|
+| Microphone | switch | ON = microphone live. Turning it off mutes. Outside a call MuteDeck acts on the system microphone |
+| Video | switch | ON = camera on. Unavailable outside a call, when MuteDeck reports video `disabled` |
+| Leave meeting | button | Leaves the current meeting. Available only during a call |
+| Call, Control, Recording, Screen sharing | sensors | As before |
+
+How it stays responsive: after a command the bridge publishes the expected state at once.
+MuteDeck's `/v1/status` lags a change by up to about 1.5 s, so the bridge then checks it
+every 0.5 s for up to 3 s and publishes once MuteDeck agrees, or publishes whatever MuteDeck
+reports when the window runs out. A toggle or Leave meeting has no expected state, so the
+bridge reads `/v1/status` before acting and waits for the field to change instead. Polls
+pause while any command is being confirmed, and confirming one command keeps the expected
+state of any other still in flight (for example mute and then video in quick succession). It also
+polls `/v1/status` every `MUTEDECK_POLL_INTERVAL` seconds, so the state stays right even
+when a webhook is missed, and only publishes when something changed. The webhook still
+works and merges into the same device when it uses the same `topic` and `prefix`.
+
+Availability: the device is available only while both the bridge (MQTT last will on
+`<prefix>/status`) and MuteDeck (`<prefix>/<topic>/availability`, set by the poll) are up.
+Both are retained. They are only published when `MUTEDECK_API_URL` is set; webhook-only
+devices have no availability.
+
+Authentication: MuteDeck accepts calls without a token only from its own computer by
+default. When the bridge runs elsewhere, create a token in MuteDeck under Settings >
+Plugins & API (or pair through `POST /v1/pair`) and pass it as `MUTEDECK_API_TOKEN`.
+
+Commands, if you want to drive it from something other than Home Assistant:
+
+| Topic | Payload |
+|---|---|
+| `<prefix>/<topic>/mute/set` | `ON` (unmute), `OFF` (mute), `TOGGLE` |
+| `<prefix>/<topic>/video/set` | `ON`, `OFF`, `TOGGLE` |
+| `<prefix>/<topic>/leave` | `PRESS` |
 
 ## Environment Variables
 
@@ -96,6 +137,31 @@ As long as MQTT is set up in Home Assistant, the device should automatically app
    - **Description**: The port number for the HTTP server.
    - **Required**: No
    - **Default Value**: 8080
+
+6. **MUTEDECK_API_URL**
+   - **Description**: Base URL of MuteDeck's API, e.g. `http://192.168.1.20:3491`. Enables control (see above). Unset keeps the bridge webhook-only.
+   - **Required**: No
+   - **Default Value**: None
+
+7. **MUTEDECK_API_TOKEN**
+   - **Description**: Bearer token for the MuteDeck API. Needed when the bridge does not run on the same computer as MuteDeck.
+   - **Required**: No
+   - **Default Value**: None
+
+8. **MUTEDECK_TOPIC**
+   - **Description**: Topic of the controllable device, the same value as `topic` in the webhook URL. It also names the device in Home Assistant.
+   - **Required**: No
+   - **Default Value**: mutedeck
+
+9. **MUTEDECK_PREFIX**
+   - **Description**: Prefix of the controllable device, the same value as `prefix` in the webhook URL. Also the prefix of the bridge's `<prefix>/status` topic.
+   - **Required**: No
+   - **Default Value**: mutedeck2mqtt
+
+10. **MUTEDECK_POLL_INTERVAL**
+    - **Description**: Seconds between `/v1/status` polls. `0` disables polling (the device is then always reported available).
+    - **Required**: No
+    - **Default Value**: 5
 
 ## How the App Functions
 
