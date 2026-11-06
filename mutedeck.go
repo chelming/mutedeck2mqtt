@@ -150,8 +150,20 @@ func subscribeCommands(client mqtt.Client, discoveryPrefix string) {
 	handler := func(client mqtt.Client, msg mqtt.Message) {
 		// <prefix>/<topic>/<field>/set or <prefix>/<topic>/leave
 		field := strings.TrimSuffix(strings.TrimPrefix(msg.Topic(), apiStateTopic()+"/"), "/set")
-		go handleCommand(client, discoveryPrefix, field, string(msg.Payload()))
+		// Queued so commands run one at a time, in the order they arrived
+		select {
+		case commandQueue <- command{client, discoveryPrefix, field, string(msg.Payload())}:
+		default:
+			logMessage(WARN, fmt.Sprintf("Command queue full, dropping %s", field))
+		}
 	}
+	commandWorker.Do(func() {
+		go func() {
+			for c := range commandQueue {
+				handleCommand(c.client, c.discoveryPrefix, c.field, c.payload)
+			}
+		}()
+	})
 	for _, topic := range []string{apiStateTopic() + "/+/set", apiStateTopic() + "/leave"} {
 		if token := client.Subscribe(topic, 0, handler); token.Wait() && token.Error() != nil {
 			logMessage(ERROR, fmt.Sprintf("Error subscribing to %s: %v", topic, token.Error()))
@@ -160,6 +172,15 @@ func subscribeCommands(client mqtt.Client, discoveryPrefix string) {
 		}
 	}
 }
+
+type command struct {
+	client                 mqtt.Client
+	discoveryPrefix, field string
+	payload                string
+}
+
+var commandQueue = make(chan command, 32)
+var commandWorker sync.Once
 
 func handleCommand(client mqtt.Client, discoveryPrefix, field, payload string) {
 	endpoint, state, predicted, err := commandFor(field, payload)
@@ -283,7 +304,10 @@ func confirmCommand(client mqtt.Client, discoveryPrefix string, id int, field st
 			return
 		}
 	}
-	// Every attempt failed to reach MuteDeck; the poller takes over availability
+	// Every attempt failed to reach MuteDeck: replace the unconfirmed prediction with
+	// reality, which also marks the device unavailable
+	finishConfirm(id)
+	refreshStatus(client, discoveryPrefix, false)
 }
 
 // refreshStatus reads /v1/status, publishes it and updates availability
@@ -316,9 +340,8 @@ func setAvailable(client mqtt.Client, available bool) bool {
 		payload = "online"
 	}
 	token := client.Publish(apiAvailabilityTopic(), 1, true, payload)
-	token.Wait()
-	if token.Error() != nil {
-		logMessage(ERROR, fmt.Sprintf("Error publishing availability: %v", token.Error()))
+	if err := waitToken(token); err != nil {
+		logMessage(ERROR, fmt.Sprintf("Error publishing availability: %v", err))
 		return false
 	}
 	apiAvailable = &available

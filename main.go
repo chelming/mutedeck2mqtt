@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -225,8 +226,8 @@ func main() {
 	pollInterval := 5 * time.Second
 	if v := os.Getenv("MUTEDECK_POLL_INTERVAL"); v != "" {
 		seconds, err := strconv.ParseFloat(v, 64)
-		if err != nil || seconds < 0 {
-			log.Fatalf("Invalid MUTEDECK_POLL_INTERVAL: %q", v)
+		if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 || (seconds > 0 && seconds < 0.5) {
+			log.Fatalf("Invalid MUTEDECK_POLL_INTERVAL: %q (0 disables polling, otherwise at least 0.5 seconds)", v)
 		}
 		pollInterval = time.Duration(seconds * float64(time.Second))
 	}
@@ -470,9 +471,8 @@ func sendDiscovery(client mqtt.Client, discoveryPrefix, prefix, topic string) (b
 	}
 
 	token := client.Publish(discoveryTopic, 0, true, jsonData) // Retain so HA receives discovery on reconnect
-	token.Wait()
-	if token.Error() != nil {
-		return false, fmt.Errorf("publishing discovery message: %w", token.Error())
+	if err := waitToken(token); err != nil {
+		return false, fmt.Errorf("publishing discovery message: %w", err)
 	}
 	logMessage(INFO, fmt.Sprintf("Discovery message sent to topic: %s", discoveryTopic))
 	logMessage(DEBUG, fmt.Sprintf("Discovery message body: %s", jsonData))
@@ -501,12 +501,13 @@ func publishState(client mqtt.Client, discoveryPrefix, prefix, topic string, dat
 	}
 	for _, key := range stateFields {
 		if v, ok := data[key]; ok {
+			// Map only the incoming control value: the stored one is already mapped
+			// and getPlatformName is not idempotent
+			if control, isString := v.(string); isString && key == "control" {
+				v = getPlatformName(control)
+			}
 			state[key] = v
 		}
-	}
-	// Process the control field through getPlatformName
-	if control, ok := state["control"].(string); ok {
-		state["control"] = getPlatformName(control)
 	}
 
 	jsonData, err := json.Marshal(state)
@@ -519,9 +520,8 @@ func publishState(client mqtt.Client, discoveryPrefix, prefix, topic string, dat
 
 	logMessage(DEBUG, fmt.Sprintf("Sending body: %s", jsonData))
 	token := client.Publish(fullTopic, 0, true, jsonData)
-	token.Wait()
-	if token.Error() != nil {
-		return fmt.Errorf("publishing to MQTT topic: %w", token.Error())
+	if err := waitToken(token); err != nil {
+		return fmt.Errorf("publishing to MQTT topic: %w", err)
 	}
 	lastState[fullTopic] = state
 	lastPayload[fullTopic] = string(jsonData)
@@ -542,12 +542,20 @@ func resendDiscoveryMessages(client mqtt.Client) {
 		}
 
 		token := client.Publish(topic, 0, true, jsonData)
-		token.Wait()
-		if token.Error() != nil {
-			logMessage(ERROR, fmt.Sprintf("Error publishing discovery message to MQTT topic: %v", token.Error()))
+		if err := waitToken(token); err != nil {
+			logMessage(ERROR, fmt.Sprintf("Error publishing discovery message to MQTT topic: %v", err))
 			continue
 		}
 		logMessage(INFO, fmt.Sprintf("Resent discovery message to topic: %s", topic))
 		logMessage(DEBUG, fmt.Sprintf("Resent discovery message body: %s", jsonData))
 	}
+}
+
+// waitToken waits for a publish to complete, giving up after a timeout so a stalled
+// broker cannot block the poller, webhooks and commands forever
+func waitToken(token mqtt.Token) error {
+	if !token.WaitTimeout(10 * time.Second) {
+		return fmt.Errorf("timed out waiting for the MQTT broker")
+	}
+	return token.Error()
 }
