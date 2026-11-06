@@ -5,7 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 func TestCommandFor(t *testing.T) {
@@ -169,5 +173,224 @@ func TestConcurrentConfirmations(t *testing.T) {
 
 	if watchedField("leave") != "call" || watchedField("mute") != "mute" {
 		t.Errorf("watchedField: leave=%q mute=%q", watchedField("leave"), watchedField("mute"))
+	}
+}
+
+// fakeToken completes immediately, or never when stall is set
+type fakeToken struct{ stall bool }
+
+func (f fakeToken) Wait() bool { return true }
+func (f fakeToken) WaitTimeout(d time.Duration) bool {
+	if f.stall {
+		time.Sleep(d)
+		return false
+	}
+	return true
+}
+func (f fakeToken) Done() <-chan struct{} { c := make(chan struct{}); close(c); return c }
+func (f fakeToken) Error() error          { return nil }
+
+type published struct {
+	topic   string
+	retain  bool
+	payload string
+}
+
+// fakeClient records publishes; the unimplemented interface methods are never called
+type fakeClient struct {
+	mqtt.Client
+	mu    sync.Mutex
+	sent  []published
+	stall bool
+}
+
+func (f *fakeClient) Publish(topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var s string
+	switch p := payload.(type) {
+	case []byte:
+		s = string(p)
+	case string:
+		s = p
+	}
+	f.sent = append(f.sent, published{topic, retained, s})
+	return fakeToken{f.stall}
+}
+
+func (f *fakeClient) last(topic string) (published, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.sent) - 1; i >= 0; i-- {
+		if f.sent[i].topic == topic {
+			return f.sent[i], true
+		}
+	}
+	return published{}, false
+}
+
+// resetState isolates tests that touch the package-level state
+func resetState(t *testing.T) {
+	saved := []interface{}{api, apiPrefix, apiTopic, apiAvailable}
+	api, apiAvailable = nil, nil
+	apiPrefix, apiTopic = "mutedeck2mqtt", "mutedeck"
+	lastState = map[string]map[string]interface{}{}
+	lastPayload = map[string]string{}
+	discoveryTopics = map[string]bool{}
+	discoveryMessages = map[string]DiscoveryPayloadStruct{}
+	t.Cleanup(func() {
+		api, apiPrefix, apiTopic = saved[0].(*muteDeckAPI), saved[1].(string), saved[2].(string)
+		apiAvailable = saved[3].(*bool)
+	})
+}
+
+func TestPublishStateControlIsIdempotent(t *testing.T) {
+	resetState(t)
+	c := &fakeClient{}
+	publish := func(data map[string]interface{}) string {
+		if err := publishState(c, "homeassistant", "mutedeck2mqtt", "mutedeck", data, false); err != nil {
+			t.Fatal(err)
+		}
+		p, _ := c.last("mutedeck2mqtt/mutedeck")
+		var out map[string]interface{}
+		json.Unmarshal([]byte(p.payload), &out)
+		return out["control"].(string)
+	}
+	if got := publish(map[string]interface{}{"control": "streamyard", "mute": "active"}); got != "StreamYard" {
+		t.Fatalf("control = %q", got)
+	}
+	// A later publish without control must keep the mapped value untouched
+	if got := publish(map[string]interface{}{"mute": "inactive"}); got != "StreamYard" {
+		t.Errorf("control after second publish = %q, want StreamYard", got)
+	}
+}
+
+func TestPublishStateKeepsWebhookFieldsAndRetention(t *testing.T) {
+	resetState(t)
+	c := &fakeClient{}
+	data := map[string]interface{}{"call": "active", "extra": "kept"}
+	if err := publishState(c, "homeassistant", "mutedeck2mqtt", "mutedeck", data, false); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := c.last("mutedeck2mqtt/mutedeck")
+	if !strings.Contains(p.payload, `"extra":"kept"`) {
+		t.Errorf("webhook field dropped: %s", p.payload)
+	}
+	if p.retain {
+		t.Errorf("webhook-only state must not be retained")
+	}
+
+	api = newMuteDeckAPI("http://127.0.0.1:1", "")
+	if err := publishState(c, "homeassistant", "mutedeck2mqtt", "mutedeck", data, false); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := c.last("mutedeck2mqtt/mutedeck"); !p.retain {
+		t.Errorf("API device state must be retained")
+	}
+}
+
+func TestPublishStateOnlyIfChanged(t *testing.T) {
+	resetState(t)
+	c := &fakeClient{}
+	data := map[string]interface{}{"mute": "active"}
+	publishState(c, "homeassistant", "mutedeck2mqtt", "mutedeck", data, true)
+	n := len(c.sent)
+	publishState(c, "homeassistant", "mutedeck2mqtt", "mutedeck", data, true)
+	if len(c.sent) != n {
+		t.Errorf("identical state was published again")
+	}
+}
+
+func TestStatusDropsNonStateFields(t *testing.T) {
+	server, _ := fakeMuteDeck(t, "tok", http.StatusOK)
+	defer server.Close()
+	data, err := newMuteDeckAPI(server.URL, "tok").status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := data["status"]; ok || data["mute"] != "active" {
+		t.Errorf("status = %v", data)
+	}
+}
+
+func TestWaitTokenTimesOut(t *testing.T) {
+	if err := waitToken(fakeToken{}); err != nil {
+		t.Errorf("completed token: %v", err)
+	}
+	saved := publishTimeout
+	publishTimeout = 20 * time.Millisecond
+	defer func() { publishTimeout = saved }()
+	if err := waitToken(fakeToken{stall: true}); err == nil {
+		t.Errorf("stalled token did not time out")
+	}
+}
+
+func TestCommandsRunInOrder(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			mu.Lock()
+			seen = append(seen, r.URL.Query().Get("state"))
+			mu.Unlock()
+		}
+		w.Write([]byte(`{"status":200}`))
+	}))
+	defer server.Close()
+	resetState(t)
+	api = newMuteDeckAPI(server.URL, "")
+	c := &fakeClient{}
+	// Same path the subscription handler uses: enqueue, one worker drains
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 2; i++ {
+			cmd := <-commandQueue
+			handleCommand(cmd.client, cmd.discoveryPrefix, cmd.field, cmd.payload)
+		}
+		close(done)
+	}()
+	commandQueue <- command{c, "homeassistant", "leave", "PRESS"}
+	commandQueue <- command{c, "homeassistant", "video", "OFF"}
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("commands did not finish")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 || seen[0] != "" || seen[1] != "off" {
+		t.Errorf("actions seen in order: %q", seen)
+	}
+}
+
+func TestConfirmCommandRefreshesWhenMuteDeckUnreachable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	resetState(t)
+	api = newMuteDeckAPI(server.URL, "")
+	c := &fakeClient{}
+	id := startConfirm(map[string]interface{}{"mute": "active"})
+	confirmCommand(c, "homeassistant", id, "mute", map[string]interface{}{"mute": "active"}, nil)
+	if p, ok := c.last(apiAvailabilityTopic()); !ok || p.payload != "offline" {
+		t.Errorf("availability = %v, want offline", p)
+	}
+	if confirming() {
+		t.Errorf("command still pending")
+	}
+}
+
+func TestRepublishAvailability(t *testing.T) {
+	resetState(t)
+	c := &fakeClient{}
+	republishAvailability(c) // nothing known yet
+	if len(c.sent) != 0 {
+		t.Fatalf("published %v before availability was known", c.sent)
+	}
+	setAvailable(c, true)
+	republishAvailability(c)
+	if p, _ := c.last(apiAvailabilityTopic()); p.payload != "online" || !p.retain {
+		t.Errorf("republished %v", p)
 	}
 }

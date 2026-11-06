@@ -74,7 +74,14 @@ func (a *muteDeckAPI) status() (map[string]interface{}, error) {
 	if err := json.Unmarshal(body, &data); err != nil {
 		return nil, err
 	}
-	return data, nil
+	// MuteDeck adds fields such as "status": 200 that are not device state
+	state := map[string]interface{}{}
+	for _, key := range stateFields {
+		if v, ok := data[key]; ok {
+			state[key] = v
+		}
+	}
+	return state, nil
 }
 
 // action posts to /v1/<endpoint>. MuteDeck answers HTTP 200 with a body status of 400
@@ -359,7 +366,9 @@ func republishAvailability(client mqtt.Client) {
 	if *apiAvailable {
 		payload = "online"
 	}
-	client.Publish(apiAvailabilityTopic(), 1, true, payload)
+	if err := waitToken(client.Publish(apiAvailabilityTopic(), 1, true, payload)); err != nil {
+		logMessage(ERROR, fmt.Sprintf("Error republishing availability: %v", err))
+	}
 }
 
 func pollStatus(client mqtt.Client, discoveryPrefix string, interval time.Duration) {

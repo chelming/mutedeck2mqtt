@@ -49,7 +49,7 @@ To set it up, go to MuteDeck's settings, enable the webhook, and enter the URL f
 
 
 ### Home Assistant
-As long as MQTT is set up in Home Assistant, the device should automatically appear after it checks in for the first time using MQTT discovery. Discovery and state messages are retained, so Home Assistant has the last state after a restart. The bridge never clears that retained state, so a webhook-only device keeps showing its last state after the bridge or MuteDeck goes away, until the next webhook arrives. To clear it from the broker, publish an empty retained message to `<prefix>/<topic>`. When Home Assistant restarts and broadcasts a Birth Message, mutedeck2mqtt will automatically rebroadcast the discovery messages.
+As long as MQTT is set up in Home Assistant, the device should automatically appear after it checks in for the first time using MQTT discovery. Discovery messages are retained. State is retained only for the device controlled through `MUTEDECK_API_URL`, which has availability to mark it stale; a webhook-only device's state is not retained, so it shows as unknown after a Home Assistant restart until the next webhook arrives. When Home Assistant restarts and broadcasts a Birth Message, mutedeck2mqtt will automatically rebroadcast the discovery messages.
 
 ### Controlling MuteDeck (optional)
 

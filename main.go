@@ -482,7 +482,7 @@ func sendDiscovery(client mqtt.Client, discoveryPrefix, prefix, topic string) (b
 	return true, nil
 }
 
-// publishState merges data into the device's last known state and publishes it, retained.
+// publishState merges data into the device's last known state and publishes it, retained for the API device.
 // Webhook posts, polled /v1/status and predicted command results all come through here.
 // With onlyIfChanged, a state identical to the last one published is skipped.
 func publishState(client mqtt.Client, discoveryPrefix, prefix, topic string, data map[string]interface{}, onlyIfChanged bool) error {
@@ -499,15 +499,13 @@ func publishState(client mqtt.Client, discoveryPrefix, prefix, topic string, dat
 	for k, v := range lastState[fullTopic] {
 		state[k] = v
 	}
-	for _, key := range stateFields {
-		if v, ok := data[key]; ok {
-			// Map only the incoming control value: the stored one is already mapped
-			// and getPlatformName is not idempotent
-			if control, isString := v.(string); isString && key == "control" {
-				v = getPlatformName(control)
-			}
-			state[key] = v
+	for key, v := range data {
+		// Map only the incoming control value: the stored one is already mapped
+		// and getPlatformName is not idempotent
+		if control, isString := v.(string); isString && key == "control" {
+			v = getPlatformName(control)
 		}
+		state[key] = v
 	}
 
 	jsonData, err := json.Marshal(state)
@@ -519,7 +517,9 @@ func publishState(client mqtt.Client, discoveryPrefix, prefix, topic string, dat
 	}
 
 	logMessage(DEBUG, fmt.Sprintf("Sending body: %s", jsonData))
-	token := client.Publish(fullTopic, 0, true, jsonData)
+	// Only the API device has availability to mark a stale state, so only its state is
+	// retained; a webhook-only device would otherwise show its last state indefinitely
+	token := client.Publish(fullTopic, 0, isAPIDevice(prefix, topic), jsonData)
 	if err := waitToken(token); err != nil {
 		return fmt.Errorf("publishing to MQTT topic: %w", err)
 	}
@@ -553,8 +553,10 @@ func resendDiscoveryMessages(client mqtt.Client) {
 
 // waitToken waits for a publish to complete, giving up after a timeout so a stalled
 // broker cannot block the poller, webhooks and commands forever
+var publishTimeout = 10 * time.Second
+
 func waitToken(token mqtt.Token) error {
-	if !token.WaitTimeout(10 * time.Second) {
+	if !token.WaitTimeout(publishTimeout) {
 		return fmt.Errorf("timed out waiting for the MQTT broker")
 	}
 	return token.Error()
